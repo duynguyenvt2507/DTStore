@@ -1,0 +1,26 @@
+{
+  "name": "dtstore",
+  "version": "1.0.0",
+  "description": "DTStore Product Catalog API on top of MySQL schema",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/server.js",
+    "lint": "echo \"No linter configured\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://localhost:26831/duynguyenvt2507/DTStore"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "mysql2": "^3.24.6"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1"
+  }
+}
