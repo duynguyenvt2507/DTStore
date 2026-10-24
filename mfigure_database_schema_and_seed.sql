@@ -556,6 +556,22 @@ INSERT INTO users (user_id,full_name,email,phone,password_hash,default_address,m
 (1,'Quản Trị Viên M Figure','admin@mfigure.vn','0987770035','$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','Hà Nội','VIP_OTAKU','ADMIN'),
 (2,'Trần Hoàng Nam','nam.tran@gmail.com','0912345678','$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi','Hà Nội','GOLD','CUSTOMER');
 
+INSERT INTO orders
+(order_id,order_code,user_id,customer_name,customer_phone,customer_email,shipping_address,order_note,subtotal_amount,promo_discount_amount,voucher_discount_amount,discount_amount,shipping_fee,final_amount,deposit_paid,applied_voucher_code,payment_method,payment_status,order_status)
+VALUES
+(9001,'OD-DEMO-0001',2,'Trần Hoàng Nam','0912345678','nam.tran@gmail.com','Hà Nội',NULL,550000,0,100000,100000,0,450000,450000,'MFIGURE100','BANK_TRANSFER','PAID','COMPLETED');
+
+INSERT INTO order_items
+(order_item_id,order_id,product_id,product_name_snapshot,quantity,unit_price,discount_per_unit,line_total,is_free_gift,is_preorder_item,applied_promotion_id)
+VALUES
+(9001,9001,103,'Hatsune Miku Trio-Try-iT Raincoat Ver.',1,550000,100000,450000,0,0,3);
+
+INSERT INTO promotion_usages (usage_id,promotion_id,order_id,user_id,discount_saved)
+VALUES (9001,3,9001,2,100000);
+
+UPDATE promotions SET used_count=1 WHERE promotion_id=3;
+UPDATE products SET sold_count=1, stock_quantity=14 WHERE product_id=103;
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- Kiểm tra sau khi import:

@@ -1,6 +1,7 @@
 # DTStore SQL Foundation
 
 Repository này chứa schema + seed cho MySQL/MariaDB và procedure checkout transaction an toàn.
+Seed có kèm 1 đơn hàng demo (`orders`, `order_items`, `promotion_usages`) để tham chiếu dữ liệu lịch sử.
 
 ## Yêu cầu môi trường
 
