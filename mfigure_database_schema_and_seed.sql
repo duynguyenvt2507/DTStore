@@ -241,6 +241,252 @@ SELECT pm.promotion_id,pm.name,pm.code,pm.promotion_type,pm.used_count,pm.usage_
 FROM promotions pm LEFT JOIN promotion_usages pu ON pu.promotion_id=pm.promotion_id
 GROUP BY pm.promotion_id,pm.name,pm.code,pm.promotion_type,pm.used_count,pm.usage_limit,pm.start_date,pm.end_date;
 
+DELIMITER $$
+CREATE PROCEDURE `sp_place_order_with_promotions`(
+  IN p_user_id INT UNSIGNED,
+  IN p_product_id INT UNSIGNED,
+  IN p_quantity INT UNSIGNED,
+  IN p_use_deposit TINYINT,
+  IN p_payment_method VARCHAR(20),
+  IN p_customer_name VARCHAR(150),
+  IN p_customer_phone VARCHAR(20),
+  IN p_customer_email VARCHAR(150),
+  IN p_shipping_address TEXT,
+  OUT o_order_id INT UNSIGNED,
+  OUT o_message VARCHAR(255)
+)
+proc_main: BEGIN
+  DECLARE v_now DATETIME DEFAULT NOW();
+  DECLARE v_order_id INT UNSIGNED;
+  DECLARE v_order_code VARCHAR(30);
+  DECLARE v_product_name VARCHAR(300);
+  DECLARE v_category_id INT UNSIGNED;
+  DECLARE v_product_status VARCHAR(20);
+  DECLARE v_is_active TINYINT(1);
+  DECLARE v_stock INT;
+  DECLARE v_sold_count INT UNSIGNED;
+  DECLARE v_deposit_percent DECIMAL(5,2);
+  DECLARE v_unit_price DECIMAL(15,2);
+  DECLARE v_subtotal DECIMAL(15,2);
+  DECLARE v_discount_total DECIMAL(15,2) DEFAULT 0.00;
+  DECLARE v_final_amount DECIMAL(15,2);
+  DECLARE v_deposit_paid DECIMAL(15,2) DEFAULT 0.00;
+  DECLARE v_order_status VARCHAR(20);
+  DECLARE v_payment_status VARCHAR(20);
+  DECLARE v_payment_method_input VARCHAR(20);
+
+  DECLARE v_promotion_id INT UNSIGNED;
+  DECLARE v_promo_buy_qty INT UNSIGNED;
+  DECLARE v_promo_get_qty INT UNSIGNED;
+  DECLARE v_reward_product_id INT UNSIGNED;
+  DECLARE v_reward_product_name VARCHAR(300);
+  DECLARE v_reward_stock INT;
+  DECLARE v_reward_sold_count INT UNSIGNED;
+  DECLARE v_reward_unit_price DECIMAL(15,2);
+  DECLARE v_gift_sets INT UNSIGNED DEFAULT 0;
+  DECLARE v_gift_qty INT UNSIGNED DEFAULT 0;
+  DECLARE v_usage_limit INT UNSIGNED;
+  DECLARE v_used_count INT UNSIGNED;
+  DECLARE v_error_message VARCHAR(255) DEFAULT NULL;
+
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    ROLLBACK;
+    SET o_order_id = NULL;
+    SET o_message = COALESCE(v_error_message,'Checkout failed and rolled back due to SQL error.');
+  END;
+
+  SET o_order_id = NULL;
+  SET o_message = NULL;
+
+  IF p_quantity IS NULL OR p_quantity = 0 THEN
+    SET v_error_message = 'Quantity must be greater than 0.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+  IF p_customer_name IS NULL OR TRIM(p_customer_name) = '' THEN
+    SET v_error_message = 'Customer name is required.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+  IF p_customer_phone IS NULL OR TRIM(p_customer_phone) = '' THEN
+    SET v_error_message = 'Customer phone is required.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+  IF p_shipping_address IS NULL OR TRIM(p_shipping_address) = '' THEN
+    SET v_error_message = 'Shipping address is required.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+
+  START TRANSACTION;
+
+  SELECT p.name,p.category_id,p.product_status,p.is_active,p.stock_quantity,p.sold_count,p.deposit_percent,
+         COALESCE(fs.flash_sale_price,p.sale_price,p.original_price)
+  INTO v_product_name,v_category_id,v_product_status,v_is_active,v_stock,v_sold_count,v_deposit_percent,v_unit_price
+  FROM products p
+  LEFT JOIN (
+    SELECT r.target_id,MIN(r.flash_sale_price) flash_sale_price
+    FROM promotion_rules r
+    JOIN promotions pm ON pm.promotion_id=r.promotion_id
+    WHERE r.target_type='PRODUCT'
+      AND r.role='APPLICABLE_ITEM'
+      AND pm.promotion_type='FLASH_SALE'
+      AND pm.is_active=1
+      AND v_now BETWEEN pm.start_date AND pm.end_date
+      AND (pm.usage_limit IS NULL OR pm.used_count < pm.usage_limit)
+    GROUP BY r.target_id
+  ) fs ON fs.target_id=p.product_id
+  WHERE p.product_id=p_product_id
+  FOR UPDATE;
+
+  IF v_product_name IS NULL THEN
+    SET v_error_message = 'Product not found.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+  IF v_is_active <> 1 THEN
+    SET v_error_message = 'Product is inactive.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+  IF v_stock < p_quantity THEN
+    SET v_error_message = 'Insufficient stock for main product.';
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+  END IF;
+
+  SELECT pm.promotion_id,pm.buy_quantity,pm.get_quantity,rr.target_id
+  INTO v_promotion_id,v_promo_buy_qty,v_promo_get_qty,v_reward_product_id
+  FROM promotions pm
+  JOIN promotion_rules br ON br.promotion_id=pm.promotion_id
+  JOIN promotion_rules rr ON rr.promotion_id=pm.promotion_id
+  WHERE pm.promotion_type='BUY_X_GET_Y'
+    AND pm.is_active=1
+    AND v_now BETWEEN pm.start_date AND pm.end_date
+    AND (pm.usage_limit IS NULL OR pm.used_count < pm.usage_limit)
+    AND br.role='BUY_CONDITION'
+    AND rr.role='GET_REWARD'
+    AND rr.target_type='PRODUCT'
+    AND (
+      (br.target_type='PRODUCT' AND br.target_id=p_product_id)
+      OR (br.target_type='CATEGORY' AND br.target_id=v_category_id)
+      OR br.target_type='ALL'
+    )
+  ORDER BY pm.priority ASC,pm.promotion_id ASC
+  LIMIT 1;
+
+  IF v_promotion_id IS NOT NULL THEN
+    SELECT usage_limit,used_count
+    INTO v_usage_limit,v_used_count
+    FROM promotions
+    WHERE promotion_id=v_promotion_id
+    FOR UPDATE;
+
+    IF v_usage_limit IS NOT NULL AND v_used_count >= v_usage_limit THEN
+      SET v_error_message = 'Promotion usage limit reached.';
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+    END IF;
+
+    IF v_promo_buy_qty IS NULL OR v_promo_buy_qty = 0 THEN
+      SET v_promo_buy_qty = 1;
+    END IF;
+    IF v_promo_get_qty IS NULL OR v_promo_get_qty = 0 THEN
+      SET v_promo_get_qty = 1;
+    END IF;
+    SET v_gift_sets = FLOOR(p_quantity / v_promo_buy_qty);
+    SET v_gift_qty = v_gift_sets * v_promo_get_qty;
+  END IF;
+
+  IF v_gift_qty > 0 THEN
+    SELECT p.name,p.stock_quantity,p.sold_count,COALESCE(p.sale_price,p.original_price)
+    INTO v_reward_product_name,v_reward_stock,v_reward_sold_count,v_reward_unit_price
+    FROM products p
+    WHERE p.product_id=v_reward_product_id
+      AND p.is_active=1
+    FOR UPDATE;
+
+    IF v_reward_product_name IS NULL THEN
+      SET v_error_message = 'Reward product is missing or inactive.';
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+    END IF;
+    IF v_reward_stock < v_gift_qty THEN
+      SET v_error_message = 'Insufficient stock for reward product.';
+      SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+    END IF;
+  END IF;
+
+  SET v_subtotal = v_unit_price * p_quantity;
+  IF v_gift_qty > 0 THEN
+    SET v_discount_total = v_reward_unit_price * v_gift_qty;
+  END IF;
+  SET v_final_amount = v_subtotal;
+
+  IF v_product_status = 'PRE_ORDER' THEN
+    SET v_order_status = 'PRE_ORDER_WAITING';
+    IF p_use_deposit = 1 THEN
+      SET v_deposit_paid = ROUND(v_final_amount * (v_deposit_percent / 100),2);
+      SET v_payment_status = 'DEPOSIT_PAID';
+    ELSE
+      SET v_deposit_paid = v_final_amount;
+      SET v_payment_status = 'PAID';
+    END IF;
+  ELSE
+    SET v_order_status = 'PENDING';
+    SET v_deposit_paid = v_final_amount;
+    SET v_payment_status = 'PAID';
+  END IF;
+
+  SET v_payment_method_input = COALESCE(NULLIF(p_payment_method,''),'BANK_TRANSFER');
+  IF v_payment_method_input NOT IN ('BANK_TRANSFER','COD','VNPAY','MOMO') THEN
+    SET v_payment_method_input = 'BANK_TRANSFER';
+  END IF;
+
+  SET v_order_code = CONCAT('OD', DATE_FORMAT(v_now,'%Y%m%d%H%i%s'), LPAD(FLOOR(RAND() * 1000),3,'0'));
+
+  INSERT INTO orders (
+    order_code,user_id,customer_name,customer_phone,customer_email,shipping_address,
+    subtotal_amount,promo_discount_amount,voucher_discount_amount,discount_amount,shipping_fee,final_amount,
+    deposit_paid,payment_method,payment_status,order_status
+  ) VALUES (
+    v_order_code,p_user_id,p_customer_name,p_customer_phone,p_customer_email,p_shipping_address,
+    v_subtotal,v_discount_total,0,v_discount_total,0,v_final_amount,
+    v_deposit_paid,v_payment_method_input,v_payment_status,v_order_status
+  );
+  SET v_order_id = LAST_INSERT_ID();
+
+  INSERT INTO order_items (
+    order_id,product_id,product_name_snapshot,quantity,unit_price,discount_per_unit,line_total,is_free_gift,is_preorder_item,applied_promotion_id
+  ) VALUES (
+    v_order_id,p_product_id,v_product_name,p_quantity,v_unit_price,0,v_subtotal,0,(v_product_status='PRE_ORDER'),v_promotion_id
+  );
+
+  UPDATE products
+  SET stock_quantity=stock_quantity-p_quantity,
+      sold_count=sold_count+p_quantity
+  WHERE product_id=p_product_id;
+
+  IF v_gift_qty > 0 THEN
+    INSERT INTO order_items (
+      order_id,product_id,product_name_snapshot,quantity,unit_price,discount_per_unit,line_total,is_free_gift,is_preorder_item,applied_promotion_id
+    ) VALUES (
+      v_order_id,v_reward_product_id,v_reward_product_name,v_gift_qty,v_reward_unit_price,v_reward_unit_price,0,1,0,v_promotion_id
+    );
+
+    UPDATE products
+    SET stock_quantity=stock_quantity-v_gift_qty,
+        sold_count=sold_count+v_gift_qty
+    WHERE product_id=v_reward_product_id;
+
+    INSERT INTO promotion_usages (promotion_id,order_id,user_id,discount_saved)
+    VALUES (v_promotion_id,v_order_id,p_user_id,v_discount_total);
+
+    UPDATE promotions
+    SET used_count=used_count+1
+    WHERE promotion_id=v_promotion_id;
+  END IF;
+
+  COMMIT;
+
+  SET o_order_id = v_order_id;
+  SET o_message = CONCAT('Order placed successfully: ', v_order_code);
+END$$
+DELIMITER ;
+
 INSERT INTO categories (category_id,parent_id,code,name,slug,description,sort_order) VALUES
 (1,NULL,'PRIZE','Game Prize Figure','game-prize-figure','Mô hình Prize Figure - Mua 2 tặng 1',1),
 (2,NULL,'SCALE','Scale Figure','scale-figure','Mô hình tỷ lệ cao cấp - Tặng hộp MICA',2),
